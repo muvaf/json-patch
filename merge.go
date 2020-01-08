@@ -379,3 +379,132 @@ func getDiff(a, b map[string]interface{}) (map[string]interface{}, error) {
 	}
 	return into, nil
 }
+
+// CreateLateInitPatch will return a merge-patch document capable of
+// filling nil values in original document with the corresponding values from
+// modifiedJSON if they exist.
+func CreateLateInitPatch(originalJSON, modifiedJSON []byte) ([]byte, error) {
+	originalResemblesArray := resemblesJSONArray(originalJSON)
+	modifiedResemblesArray := resemblesJSONArray(modifiedJSON)
+
+	// Do both byte-slices seem like JSON arrays?
+	if originalResemblesArray && modifiedResemblesArray {
+		return createArrayLateInitPatch(originalJSON, modifiedJSON)
+	}
+
+	// Are both byte-slices are not arrays? Then they are likely JSON objects...
+	if !originalResemblesArray && !modifiedResemblesArray {
+		return createLateInitPatch(originalJSON, modifiedJSON)
+	}
+
+	// None of the above? Then return an error because of mismatched types.
+	return nil, errBadMergeTypes
+}
+
+// createArrayMergePatch will return an array of merge-patch document capable of
+// filling nil values in original document with the corresponding values from
+// modifiedJSON if they exist.
+func createArrayLateInitPatch(originalJSON, modifiedJSON []byte) ([]byte, error) {
+	originalDocs := []json.RawMessage{}
+	modifiedDocs := []json.RawMessage{}
+
+	err := json.Unmarshal(originalJSON, &originalDocs)
+	if err != nil {
+		return nil, errBadJSONDoc
+	}
+
+	err = json.Unmarshal(modifiedJSON, &modifiedDocs)
+	if err != nil {
+		return nil, errBadJSONDoc
+	}
+
+	total := len(originalDocs)
+	if len(modifiedDocs) != total {
+		return nil, errBadJSONDoc
+	}
+
+	result := []json.RawMessage{}
+	for i := 0; i < len(originalDocs); i++ {
+		original := originalDocs[i]
+		modified := modifiedDocs[i]
+
+		patch, err := createObjectMergePatch(original, modified)
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, json.RawMessage(patch))
+	}
+
+	return json.Marshal(result)
+}
+
+// createLateInitPatch will return a merge-patch document capable of
+// filling nil values in original document with the corresponding values from
+// modifiedJSON if they exist.
+func createLateInitPatch(originalJSON, modifiedJSON []byte) ([]byte, error) {
+	originalDoc := map[string]interface{}{}
+	modifiedDoc := map[string]interface{}{}
+
+	err := json.Unmarshal(originalJSON, &originalDoc)
+	if err != nil {
+		return nil, errBadJSONDoc
+	}
+
+	err = json.Unmarshal(modifiedJSON, &modifiedDoc)
+	if err != nil {
+		return nil, errBadJSONDoc
+	}
+
+	dest, err := getLazyDiff(originalDoc, modifiedDoc)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(dest)
+}
+
+// getLazyDiff returns the (recursive) difference between a and b as a map[string]interface{},
+// only for the fields of a that do not have a value.
+func getLazyDiff(a, b map[string]interface{}) (map[string]interface{}, error) {
+	into := map[string]interface{}{}
+	for key, bv := range b {
+		av, ok := a[key]
+		// value was added
+		if !ok {
+			into[key] = bv
+			continue
+		}
+		switch at := av.(type) {
+		case map[string]interface{}:
+			bt := bv.(map[string]interface{})
+			dst := make(map[string]interface{}, len(bt))
+			dst, err := getLazyDiff(at, bt)
+			if err != nil {
+				return nil, err
+			}
+			if len(dst) > 0 {
+				into[key] = dst
+			}
+		case string, float64, bool, []interface{}:
+			continue
+		case nil:
+			switch bv.(type) {
+			case nil:
+				// Both nil, fine.
+			default:
+				into[key] = bv
+			}
+		default:
+			panic(fmt.Sprintf("Unknown type:%T in key %s", av, key))
+		}
+	}
+	//// Now add all deleted values as nil
+	//for key := range a {
+	//	_, found := b[key]
+	//	if !found {
+	//		into[key] = nil
+	//	}
+	//}
+	return into, nil
+}
